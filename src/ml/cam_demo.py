@@ -11,21 +11,30 @@ def run():
     if not cam.isOpened():
         print("Error: Tidak dapat membuka kamera.")
         return
-    print("Kamera aktif. Tekan q untuk keluar.")
+    print("Kamera aktif. Tekan 'q' untuk keluar.")
+    last = 0
     while True:
-        ret, frame = cam.read()
-        if not ret:
+        ok, frame = cam.read()
+        if not ok:
+            print("Gagal mengambil frame")
             break
-        results = svc.recognize(frame)
+        # limit inference fps ~10
+        now = time.time()
+        if now - last > 0.08:
+            out = svc.recognize(frame)
+            last = now
+        else:
+            out = getattr(run, "_last_out", {"results": []})
+        results = out["results"]
         for r in results:
-            top, right, bottom, left = r["box"]
-            label = f"{r['label']}" if r['distance'] is None else f"{r['label']} ({r['distance']:.2f})"
-            color = (0, 255, 0) if r['label'] != 'Unknown' else (0, 0, 255)
-            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
-            cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        cv2.imshow('Face Attendance', frame)
-        k = cv2.waitKey(1) & 0xff
-        if k == 27 or k == ord('q'):
+            t, rgt, b, lft = r["box"]
+            cv2.rectangle(frame, (lft, t), (rgt, b), (0, 255, 0), 2)
+            txt = f'{r["label"]} {r["distance"]:.2f}'
+            cv2.putText(frame, txt, (lft, max(20, t - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        run._last_out = out
+        cv2.imshow("Face Recognition (local)", frame)
+        k = cv2.waitKey(1) & 0xFF
+        if k == ord('q') or k == 27:
             break
     cam.release()
     cv2.destroyAllWindows()
