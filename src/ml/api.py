@@ -50,33 +50,35 @@ async def recognize_realtime(
     """
     Recognize and immediately dispatch attendance event(s) to the main service.
 
-    Dispatch contract (JSON):
-      {
-        "event": "attendance.recognized",
-        "student_id": "<label>",
-        "distance": <float>,
-        "ts": <unix_seconds>,
-        "frame_info": {"w": <int>, "h": <int>},
-        "box": {"top": int, "right": int, "bottom": int, "left": int}
-      }
-    Unknown faces are skipped by default (unless send_unknown=true with student_id="Unknown").
-    Cooldown is enforced per student via EventDispatcher.
+    Unknown faces are skipped by default (unless send_unknown=true). Cooldown is enforced per student.
     """
     content = await image.read()
     npimg = np.frombuffer(content, np.uint8)
     bgr = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
     if bgr is None:
         return JSONResponse(status_code=400, content={"ok": False, "msg": "Gambar tidak valid"})
-    h, w = bgr.shape[:2]
-    results = svc.recognize(bgr)
+
+    raw = svc.recognize(bgr)
+    # Normalize outputs from FaceService: it may return list[dict] or {"results": [...], "frame_info": {...}}
+    if isinstance(raw, dict):
+        results = raw.get("results", [])
+        frame_info = raw.get("frame_info", {})
+        w = int(frame_info.get("w", bgr.shape[1]))
+        h = int(frame_info.get("h", bgr.shape[0]))
+    else:
+        results = raw
+        h, w = bgr.shape[:2]
+
     sent_reports = []
     now = int(time.time())
     tol = svc.tolerance
     for r in results:
+        # Guard against malformed element
+        if not isinstance(r, dict):
+            continue
         label = r.get("label", "Unknown")
         dist = r.get("distance", None)
         (top, right, bottom, left) = r.get("box", (0, 0, 0, 0))
-        # Filter by recognition quality
         is_known = label != "Unknown" and dist is not None and dist <= max(0.0, min_conf or tol)
         if is_known or (send_unknown and label == "Unknown"):
             payload = {

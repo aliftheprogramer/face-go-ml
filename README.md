@@ -51,7 +51,7 @@ Set env vars before starting the server:
 ```bash
 export ATTENDANCE_WEBHOOK_URL="https://your-main-api.example.com/attendance/events"
 export ATTENDANCE_API_KEY="<optional-key>"
-export EVENT_COOLDOWN_SECONDS=60   # per-student cooldown to avoid duplicates
+export EVENT_COOLDOWN_SECONDS=5    # per-student cooldown to avoid duplicates (default 5s)
 uvicorn src.ml.api:app --reload
 ```
 

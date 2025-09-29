@@ -9,19 +9,19 @@ class EventDispatcher:
     """
     Dispatch recognition events to the main Attendance API via a webhook.
 
-    Config via env:
+        Config via env:
       - ATTENDANCE_WEBHOOK_URL: str (required to enable dispatch)
       - ATTENDANCE_API_KEY: str (optional; sent as header Authorization: Bearer <key>)
-      - EVENT_COOLDOWN_SECONDS: int (default 60) minimal interval per student_id
+            - EVENT_COOLDOWN_SECONDS: int (default 5) minimal interval per student_id
     """
 
     def __init__(self) -> None:
         self.webhook_url: Optional[str] = os.getenv("ATTENDANCE_WEBHOOK_URL")
         self.api_key: Optional[str] = os.getenv("ATTENDANCE_API_KEY")
         try:
-            self.cooldown: int = int(os.getenv("EVENT_COOLDOWN_SECONDS", "60"))
+            self.cooldown: int = int(os.getenv("EVENT_COOLDOWN_SECONDS", "5"))
         except ValueError:
-            self.cooldown = 60
+            self.cooldown = 5
         self._last_sent: Dict[str, float] = {}
         self._lock = threading.Lock()
 
