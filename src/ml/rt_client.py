@@ -2,11 +2,34 @@ import time
 import cv2
 import requests
 import numpy as np
+import threading
+import asyncio
+import websockets
 
-API_URL = 'http://127.0.0.1:8000/recognize'
+API_URL = 'http://127.0.0.1:8000/recognize/realtime?min_conf=0.45'
 
 
 def main():
+    # Start WebSocket listener thread
+    def ws_thread():
+        async def run_ws():
+            try:
+                async with websockets.connect('ws://127.0.0.1:8000/ws/recognitions') as ws:
+                    # send a ping every few seconds to keep alive
+                    while True:
+                        try:
+                            await ws.send('ping')
+                            msg = await ws.recv()
+                            print(f"WS: {msg}")
+                        except Exception:
+                            break
+                        await asyncio.sleep(1.0)
+            except Exception:
+                pass
+        asyncio.run(run_ws())
+
+    t = threading.Thread(target=ws_thread, daemon=True)
+    t.start()
     cam = cv2.VideoCapture(0)
     cam.set(3, 640)
     cam.set(4, 480)
@@ -32,6 +55,16 @@ def main():
                     if r.ok:
                         data = r.json()
                         last_results = data.get('results', [])
+                        dispatch = data.get('dispatch', [])
+                        # Print dispatch report(s) if any
+                        for d in dispatch:
+                            label = d.get('label')
+                            report = d.get('report', {})
+                            status = report.get('status')
+                            code = report.get('http_status')
+                            msg = report.get('message')
+                            if status in ("sent", "failed"):
+                                print(f"dispatch[{label}] -> {status} ({code}) {str(msg)[:120]}")
                 except Exception as e:
                     # print once in a while
                     pass

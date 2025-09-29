@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import face_recognition
 from typing import List, Tuple, Optional, Dict
+import os
 
 EMB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data', 'embeddings')
 FACES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data', 'faces')
@@ -20,7 +21,12 @@ class FaceService:
     """
 
     def __init__(self, tolerance: float = 0.45):
-        self.tolerance = tolerance
+        # Allow override via env FACE_TOLERANCE
+        try:
+            env_tol = float(os.getenv('FACE_TOLERANCE', str(tolerance)))
+        except ValueError:
+            env_tol = tolerance
+        self.tolerance = env_tol
         self.known_encodings: List[np.ndarray] = []
         self.known_labels: List[str] = []
         self._load_database()

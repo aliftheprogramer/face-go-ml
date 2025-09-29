@@ -6,3 +6,5 @@ uvicorn
 pydantic
 python-multipart
 requests
+python-dotenv
+websockets
