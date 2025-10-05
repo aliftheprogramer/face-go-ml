@@ -48,7 +48,7 @@ async def recognize_realtime(
     send_unknown: bool = Query(False, description="If true, also send events for Unknown faces."),
 ):
     """
-    Recognize and immediately dispatch attendance event(s) to the main service.
+    Recognize and immediately dispatch attendance event(s) to the main service, and broadcast via WebSocket.
 
     Unknown faces are skipped by default (unless send_unknown=true). Cooldown is enforced per student.
     """
@@ -91,6 +91,14 @@ async def recognize_realtime(
             }
             report = dispatcher.maybe_send(label, payload)
             sent_reports.append({"label": label, "report": report})
+            # Broadcast to WS subscribers
+            _broadcast_ws({
+                "type": "recognized",
+                "student_id": label,
+                "distance": dist,
+                "ts": now,
+                "dispatch": report
+            })
     return {"ok": True, "results": results, "dispatch": sent_reports, "webhook_enabled": dispatcher.enabled()}
 
 
@@ -138,49 +146,7 @@ def _broadcast_ws(message: dict):
         ws_clients.discard(ws)
 
 
-# Modify realtime endpoint to also push to WS
-@app.post("/recognize/realtime")
-async def recognize_realtime(
-    image: UploadFile = File(...),
-    min_conf: float = Query(0.0, description="Max allowed distance to consider recognized; <= tolerance used."),
-    send_unknown: bool = Query(False, description="If true, also send events for Unknown faces."),
-):
-    # ... existing code kept ...
-    content = await image.read()
-    npimg = np.frombuffer(content, np.uint8)
-    bgr = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-    if bgr is None:
-        return JSONResponse(status_code=400, content={"ok": False, "msg": "Gambar tidak valid"})
-    h, w = bgr.shape[:2]
-    results = svc.recognize(bgr)
-    sent_reports = []
-    now = int(time.time())
-    tol = svc.tolerance
-    for r in results:
-        label = r.get("label", "Unknown")
-        dist = r.get("distance", None)
-        (top, right, bottom, left) = r.get("box", (0, 0, 0, 0))
-        is_known = label != "Unknown" and dist is not None and dist <= max(0.0, min_conf or tol)
-        if is_known or (send_unknown and label == "Unknown"):
-            payload = {
-                "event": "attendance.recognized",
-                "student_id": label,
-                "distance": dist,
-                "ts": now,
-                "frame_info": {"w": w, "h": h},
-                "box": {"top": top, "right": right, "bottom": bottom, "left": left},
-            }
-            report = dispatcher.maybe_send(label, payload)
-            sent_reports.append({"label": label, "report": report})
-            # Broadcast to WS subscribers
-            _broadcast_ws({
-                "type": "recognized",
-                "student_id": label,
-                "distance": dist,
-                "ts": now,
-                "dispatch": report
-            })
-    return {"ok": True, "results": results, "dispatch": sent_reports, "webhook_enabled": dispatcher.enabled()}
+# (deduplicated above)
 
 
 # --- Mock webhook for testing tokens locally (optional) ---

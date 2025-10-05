@@ -3,31 +3,21 @@
 This project provides a minimal ML microservice to enroll face embeddings and recognize faces for student attendance.
 
 ## Features
-- Enroll: POST an image with `student_id` to store embeddings
-- Recognize: POST an image and get predicted labels and distances
-- Webcam demo to visualize in real-time
 
 ## Install
 Create a venv (optional) and install requirements.
 
 ## Run API
-- Start server: `uvicorn src.ml.api:app --reload`
-- POST /enroll (multipart/form-data): fields `student_id`, `image`
-- POST /recognize (multipart/form-data): field `image`
  - POST /recognize/realtime (multipart/form-data): field `image` + query `min_conf` (optional) `send_unknown` (optional)
  - GET /health, GET /config
 	- WebSocket: `ws://<host>/ws/recognitions` (server pushes events when recognized)
 
 ## Data Layout
-- `data/embeddings/<student_id>.npy`: saved embeddings
-- `data/faces/<student_id>/*.jpg`: cropped face images for reference
 
 ## Webcam Demo
 `python -m src.ml.cam_demo`
 
 ## Notes
-- Uses `face_recognition` (dlib) for encodings; CPU HOG model by default.
-- Adjust tolerance in `FaceService(tolerance=0.45)` for stricter/looser matching.
 
 ## Environment (.env)
 Copy `.env.example` to `.env` and adjust as needed:
@@ -37,10 +27,6 @@ cp .env.example .env
 ```
 
 Supported variables:
-- `ATTENDANCE_WEBHOOK_URL` — main API endpoint to receive events (leave empty to disable)
-- `ATTENDANCE_API_KEY` — optional Bearer token for the webhook
-- `EVENT_COOLDOWN_SECONDS` — default 60 seconds per student
-- `FACE_TOLERANCE` — override face match tolerance (default 0.45)
 
 ## Realtime flow (Microservice → Main Attendance API)
 
@@ -95,20 +81,17 @@ Main Attendance API expected to respond 2xx. If `EVENT_COOLDOWN_SECONDS` is set,
 
 ## Full ML API reference
 
-- POST `/enroll`
 	- Request (multipart/form-data):
 		- `student_id`: string (required)
 		- `image`: file (required; JPG/PNG)
 	- Response 200:
 		- `{ ok: boolean, saved: number, msg: string }`
 
-- POST `/recognize`
 	- Request (multipart/form-data):
 		- `image`: file
 	- Response 200:
 		- `{ ok: true, results: [ { box: [top,right,bottom,left], label: string, distance: number|null } ] }`
 
-- POST `/recognize/realtime`
 	- Request (multipart/form-data + query):
 		- `image`: file
 		- `min_conf`: float optional (default uses `FACE_TOLERANCE`/service tolerance)
@@ -117,13 +100,10 @@ Main Attendance API expected to respond 2xx. If `EVENT_COOLDOWN_SECONDS` is set,
 	- Response 200:
 		- `{ ok: true, results: [...], dispatch: [ { label: string, report: { status: 'sent'|'failed'|'skipped', http_status?: number, message?: string } } ], webhook_enabled: boolean }`
 
-- GET `/health`
 	- Response 200: `{ ok: true, encodings: number, labels: number }`
 
-- GET `/config`
 	- Response 200: `{ tolerance: number, webhook_enabled: boolean, cooldown_seconds: number }`
 
-- WebSocket `ws://<host>/ws/recognitions`
 	- Server push message example:
 	```json
 	{
@@ -135,7 +115,6 @@ Main Attendance API expected to respond 2xx. If `EVENT_COOLDOWN_SECONDS` is set,
 	}
 	```
 
-- Mock webhook (testing only): POST `/mock/webhook`
 	- Responds `{ ok: true, token: "ATT-<ts>-<student_id>", received: <payload> }`
 
 
@@ -190,13 +169,11 @@ Your Attendance Web API should expose a webhook endpoint to receive recognition 
 
 ## Example client flows
 
-- Simple: post still images
 ```bash
 curl -X POST "http://127.0.0.1:8000/recognize/realtime?min_conf=0.45&send_unknown=false" \
 	-F image=@known_faces/siswaA/img1.jpg
 ```
 
-- Realtime webcam client (HTTP + WebSocket)
 ```bash
 python -m src.ml.rt_client
 ```
