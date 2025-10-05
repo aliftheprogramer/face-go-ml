@@ -206,5 +206,68 @@ dispatch[siswaA] -> sent (200) {"ok":true,"token":"ATT-..."}
 WS: {"type":"recognized","student_id":"siswaA",...}
 ```
 
+## Cara jalanin di lokal (Linux)
 
+Di bawah ini langkah cepat dari nol sampai API jalan. Jalankan perintah-perintah ini di folder project.
+
+1) Buat dan aktifkan virtualenv
+
+```bash
+python3 -m venv venv
 source venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+2) Install dependencies Python
+
+```bash
+pip install -r requirements.txt
+```
+
+Catatan Linux: jika instalasi `face_recognition`/`dlib` gagal, install alat build dan lib OpenCV terlebih dulu lalu ulangi `pip install`:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake libgl1 libglib2.0-0
+# lalu ulangi
+pip install -r requirements.txt
+```
+
+3) (Opsional) Set environment untuk webhook/testing
+
+```bash
+# jika mau coba mock webhook lokal
+export ATTENDANCE_WEBHOOK_URL="http://127.0.0.1:8000/mock/webhook"
+export EVENT_COOLDOWN_SECONDS=5
+```
+
+4) (Opsional) Bulk-enroll dari folder `known_faces/`
+
+```bash
+python -m src.ml.bulk_enroll
+```
+
+5) Jalankan server API
+
+```bash
+uvicorn src.ml.api:app --reload
+```
+
+6) Coba panggil endpoint (terminal lain)
+
+```bash
+# Enroll satu foto
+curl -X POST "http://127.0.0.1:8000/enroll" \
+	-F student_id=alip \
+	-F image=@known_faces/alip/IMG_20230927_203408.jpg
+
+# Recognize realtime + kirim event (gunakan gambar contoh)
+curl -X POST "http://127.0.0.1:8000/recognize/realtime?min_conf=0.45&send_unknown=false" \
+	-F image=@known_faces/alip/IMG_20230927_203408.jpg
+```
+
+7) (Opsional) Demo webcam
+
+```bash
+python -m src.ml.cam_demo
+```
