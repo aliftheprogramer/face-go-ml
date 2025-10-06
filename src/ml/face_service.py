@@ -32,6 +32,14 @@ class FaceService:
         self._known_labels: List[str] = []
         self._reload_known()
 
+    @property
+    def known_encodings(self) -> List[np.ndarray]:
+        return self._known_encs
+
+    @property
+    def known_labels(self) -> List[str]:
+        return self._known_labels
+
     def _reload_known(self) -> None:
         self._known.clear()
         self._known_encs.clear()

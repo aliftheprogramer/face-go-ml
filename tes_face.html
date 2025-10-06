@@ -2,48 +2,315 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>WebSocket Test</title>
+    <title>Real-time Face Recognition Client</title>
     <style>
-        body { font-family: sans-serif; background-color: #2d2d2d; color: #f1f1f1; }
-        #messages { background-color: #1e1e1e; border: 1px solid #444; padding: 10px; height: 400px; overflow-y: scroll; white-space: pre-wrap; }
+        body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background-color: #1a1a1a; color: #f0f0f0; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        .container { display: flex; gap: 20px; width: 100%; max-width: 1200px; }
+        .video-container { position: relative; }
+        video { border: 2px solid #555; border-radius: 8px; transform: scaleX(-1); }
+        canvas { display: none; }
+        #box-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+        .bounding-box { position: absolute; border: 2px solid #00ff00; background-color: rgba(0, 255, 0, 0.1); }
+        .bounding-box-label { position: absolute; top: -20px; left: 0; background-color: #00ff00; color: #1a1a1a; padding: 2px 5px; font-size: 12px; white-space: nowrap; }
+        .results-container { flex: 1; display: flex; flex-direction: column; gap: 15px; }
+        pre { background-color: #2b2b2b; border: 1px solid #444; padding: 15px; border-radius: 5px; white-space: pre-wrap; word-wrap: break-word; font-size: 14px; min-height: 150px; }
+        h2 { border-bottom: 2px solid #444; padding-bottom: 5px; }
+        #status { font-weight: bold; }
     </style>
 </head>
 <body>
-    <h1>WebSocket Realtime Recognition</h1>
-    <p>Status: <span id="status">Connecting...</span></p>
-    <h3>Received Messages:</h3>
-    <pre id="messages"></pre>
+    <h1>Face Recognition Client (Webcam)</h1>
+    <div class="container">
+        <div class="video-container">
+            <video id="video" width="640" height="480" autoplay muted></video>
+            <canvas id="canvas" width="640" height="480"></canvas>
+            <div id="box-overlay"></div>
+        </div>
+        <div class="results-container">
+            <div>
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8" />
+                    <title>Real-time Face Recognition Client</title>
+                    <style>
+                        body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background:#1a1a1a; color:#f0f0f0; display:flex; flex-direction:column; align-items:center; padding:20px; }
+                        .container { display:flex; gap:20px; width:100%; max-width:1200px; }
+                        .video-container { position:relative; }
+                        video { border:2px solid #555; border-radius:8px; transform: scaleX(-1); }
+                        canvas { display:none; }
+                        #box-overlay { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+                        .bounding-box { position:absolute; border:2px solid #00ff00; background-color: rgba(0,255,0,0.1); }
+                        .bounding-box-label { position:absolute; top:-20px; left:0; background:#00ff00; color:#111; padding:2px 5px; font-size:12px; white-space:nowrap; }
+                        .results-container { flex:1; display:flex; flex-direction:column; gap:15px; }
+                        pre { background:#2b2b2b; border:1px solid #444; padding:15px; border-radius:5px; white-space:pre-wrap; word-wrap:break-word; font-size:14px; min-height:150px; }
+                        h2 { border-bottom:2px solid #444; padding-bottom:5px; }
+                    </style>
+                </head>
+                <body>
+                    <h1>Face Recognition Client (Webcam)</h1>
+                    <div class="container">
+                        <div class="video-container">
+                            <video id="video" width="640" height="480" autoplay muted></video>
+                            <canvas id="canvas" width="640" height="480"></canvas>
+                            <div id="box-overlay"></div>
+                        </div>
+                        <div class="results-container">
+                            <div>
+                                <h2>Config</h2>
+                                <div style="display:flex; flex-direction:column; gap:8px;">
+                                    <label>
+                                        API Base URL
+                                        <input id="apiBase" type="text" style="width:100%; padding:6px; background:#1e1e1e; color:#f0f0f0; border:1px solid #444;" placeholder="http://127.0.0.1:8000" />
+                                    </label>
+                                    <label>
+                                        WebSocket URL
+                                        <input id="wsBase" type="text" style="width:100%; padding:6px; background:#1e1e1e; color:#f0f0f0; border:1px solid #444;" placeholder="ws://127.0.0.1:8000/ws/recognitions" />
+                                    </label>
+                                    <div style="display:flex; gap:8px; align-items:center;">
+                                        <button id="saveCfg" style="padding:6px 10px;">Save</button>
+                                        <button id="pingApi" style="padding:6px 10px;">Ping API</button>
+                                        <span id="netStatus" style="margin-left:6px;">Status: unknown</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div>
+                                <h2>API Response</h2>
+                                <pre id="apiResponse">Menunggu frame...</pre>
+                            </div>
+                            <div>
+                                <h2>WebSocket Messages (<span id="wsStatus">Connecting...</span>)</h2>
+                                <pre id="wsMessages"></pre>
+                            </div>
+                        </div>
+                    </div>
 
-    <script>
-        const ws = new WebSocket("ws://127.0.0.1:8000/ws/recognitions");
-        const statusEl = document.getElementById("status");
-        const messagesEl = document.getElementById("messages");
+                    <script>
+                        const video = document.getElementById('video');
+                        const canvas = document.getElementById('canvas');
+                        const context = canvas.getContext('2d');
+                        const apiResponseEl = document.getElementById('apiResponse');
+                        const wsMessagesEl = document.getElementById('wsMessages');
+                        const wsStatusEl = document.getElementById('wsStatus');
+                        const boxOverlay = document.getElementById('box-overlay');
+                        const apiBaseEl = document.getElementById('apiBase');
+                        const wsBaseEl = document.getElementById('wsBase');
+                        const saveCfgBtn = document.getElementById('saveCfg');
+                        const pingBtn = document.getElementById('pingApi');
+                        const netStatusEl = document.getElementById('netStatus');
 
-        ws.onopen = (event) => {
-            statusEl.textContent = "Connected";
-            statusEl.style.color = "lightgreen";
-            console.log("WebSocket connection opened:", event);
-        };
+                        const defaults = { apiBase: 'http://127.0.0.1:8000', wsUrl: 'ws://127.0.0.1:8000/ws/recognitions' };
+                        function loadConfig() {
+                            const apiBase = localStorage.getItem('apiBase') || defaults.apiBase;
+                            const wsUrl = localStorage.getItem('wsUrl') || defaults.wsUrl;
+                            apiBaseEl.value = apiBase;
+                            wsBaseEl.value = wsUrl;
+                            return { apiBase, wsUrl };
+                        }
+                        function saveConfig() {
+                            localStorage.setItem('apiBase', apiBaseEl.value.trim());
+                            localStorage.setItem('wsUrl', wsBaseEl.value.trim());
+                        }
+                        saveCfgBtn.onclick = () => { saveConfig(); refreshEndpoints(); setupWebSocket(true); };
+                        pingBtn.onclick = () => pingApi();
 
-        ws.onmessage = (event) => {
-            console.log("Message from server:", event.data);
-            const data = JSON.parse(event.data);
-            messagesEl.textContent += JSON.stringify(data, null, 2) + "\n\n";
-            // Auto-scroll to bottom
-            messagesEl.scrollTop = messagesEl.scrollHeight;
-        };
+                        let { apiBase, wsUrl } = loadConfig();
+                        let API_URL = `${apiBase.replace(/\/$/, '')}/recognize/realtime?min_conf=0.45`;
+                        let WS_URL = wsUrl;
+                        function refreshEndpoints() {
+                            ({ apiBase, wsUrl } = loadConfig());
+                            API_URL = `${apiBase.replace(/\/$/, '')}/recognize/realtime?min_conf=0.45`;
+                            WS_URL = wsUrl;
+                        }
 
-        ws.onerror = (error) => {
-            statusEl.textContent = "Error";
-            statusEl.style.color = "red";
-            console.error("WebSocket error:", error);
-        };
+                        // 1) Camera
+                        async function setupCamera() {
+                            try {
+                                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                                video.srcObject = stream;
+                            } catch (err) {
+                                console.error('Error accessing camera:', err);
+                                apiResponseEl.textContent = 'Error: Tidak dapat mengakses kamera. Pastikan Anda memberikan izin.';
+                            }
+                        }
 
-        ws.onclose = (event) => {
-            statusEl.textContent = "Disconnected";
-            statusEl.style.color = "orange";
-            console.log("WebSocket connection closed:", event);
-        };
-    </script>
-</body>
-</html>
+                        // 2) Draw boxes
+                        function drawBoxes(results) {
+                            boxOverlay.innerHTML = '';
+                            const vw = video.videoWidth || video.offsetWidth || 640;
+                            const vh = video.videoHeight || video.offsetHeight || 480;
+                            results.forEach(r => {
+                                const [top, right, bottom, left] = r.box || [0,0,0,0];
+                                const boxEl = document.createElement('div');
+                                boxEl.className = 'bounding-box';
+                                boxEl.style.left = `${Math.max(0, vw - right)}px`;
+                                boxEl.style.top = `${Math.max(0, top)}px`;
+                                boxEl.style.width = `${Math.max(0, right - left)}px`;
+                                boxEl.style.height = `${Math.max(0, bottom - top)}px`;
+                                const labelEl = document.createElement('div');
+                                labelEl.className = 'bounding-box-label';
+                                const dist = (typeof r.distance === 'number') ? r.distance.toFixed(2) : 'n/a';
+                                labelEl.innerText = `${r.label || 'Unknown'} (${dist})`;
+                                boxEl.appendChild(labelEl);
+                                boxOverlay.appendChild(boxEl);
+                            });
+                        }
+
+                        // 3) Network state
+                        let inFlight = false;
+                        let online = false;
+                        let lastErr = '';
+
+                        async function sendFrame() {
+                            if (!online || inFlight) return;
+                            inFlight = true;
+
+                            // draw into canvas (mirrored)
+                            context.translate(canvas.width, 0);
+                            context.scale(-1, 1);
+                            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                            context.setTransform(1, 0, 0, 1, 0, 0);
+
+                            canvas.toBlob(async (blob) => {
+                                const formData = new FormData();
+                                formData.append('image', blob, 'frame.jpg');
+                                try {
+                                    const controller = new AbortController();
+                                    const id = setTimeout(() => controller.abort(), 10000);
+                                    const resp = await fetch(API_URL, { method: 'POST', body: formData, signal: controller.signal });
+                                    clearTimeout(id);
+                                    if (resp.ok) {
+                                        const data = await resp.json();
+                                        apiResponseEl.textContent = JSON.stringify(data, null, 2);
+                                        const res = Array.isArray(data.results)
+                                            ? data.results
+                                            : (data.results && Array.isArray(data.results.results) ? data.results.results : []);
+                                        if (res && res.length) drawBoxes(res); else boxOverlay.innerHTML = '';
+                                    } else {
+                                        const txt = await resp.text();
+                                        apiResponseEl.textContent = `Error: ${resp.status} ${resp.statusText}\n${txt}`;
+                                        boxOverlay.innerHTML = '';
+                                    }
+                                } catch (e) {
+                                    console.error('Fetch error:', e);
+                                    lastErr = e && e.message ? e.message : String(e);
+                                    apiResponseEl.textContent = `Fetch error: ${lastErr}`;
+                                    online = false;
+                                    updateNetStatus();
+                                    boxOverlay.innerHTML = '';
+                                }
+                                inFlight = false;
+                            }, 'image/jpeg');
+                        }
+
+                        async function pingApi() {
+                            refreshEndpoints();
+                            try {
+                                const controller = new AbortController();
+                                const id = setTimeout(() => controller.abort(), 5000);
+                                const r = await fetch(`${apiBase.replace(/\/$/, '')}/health`, { signal: controller.signal });
+                                clearTimeout(id);
+                                if (r.ok) { online = true; lastErr = ''; }
+                                else { online = false; lastErr = `HTTP ${r.status}`; }
+                            } catch (e) {
+                                online = false; lastErr = e && e.message ? e.message : String(e);
+                            }
+                            updateNetStatus();
+                        }
+                        function updateNetStatus() {
+                            netStatusEl.textContent = online ? 'Status: online' : `Status: offline${lastErr ? ' - ' + lastErr : ''}`;
+                            netStatusEl.style.color = online ? 'lightgreen' : 'orange';
+                        }
+
+                        // 4) WebSocket with reconnect
+                        let ws;
+                        let wsBackoff = 1000;
+                        function setupWebSocket(force = false) {
+                            refreshEndpoints();
+                            if (ws && ws.readyState === WebSocket.OPEN && !force) return;
+                            try { if (ws) ws.close(); } catch {}
+                            ws = new WebSocket(WS_URL);
+                            ws.onopen = () => { wsStatusEl.textContent = 'Connected'; wsStatusEl.style.color = 'lightgreen'; wsBackoff = 1000; };
+                            ws.onmessage = (evt) => {
+                                try {
+                                    const data = JSON.parse(evt.data);
+                                    wsMessagesEl.textContent += JSON.stringify(data, null, 2) + '\n\n';
+                                    wsMessagesEl.scrollTop = wsMessagesEl.scrollHeight;
+                                } catch {}
+                            };
+                            ws.onerror = () => { wsStatusEl.textContent = 'Error'; wsStatusEl.style.color = 'red'; };
+                            ws.onclose = () => {
+                                wsStatusEl.textContent = 'Disconnected. Retrying...';
+                                wsStatusEl.style.color = 'orange';
+                                setTimeout(() => setupWebSocket(), Math.min(wsBackoff, 10000));
+                                wsBackoff *= 2;
+                            };
+                        }
+
+                        // Run
+                        async function main() {
+                            await setupCamera();
+                            await pingApi();
+                            setupWebSocket();
+                            setInterval(sendFrame, 1000);
+                        }
+                        main();
+                    </script>
+                </body>
+                </html>
+                    async function pingApi() {
+                        refreshEndpoints();
+                        try {
+                            const controller = new AbortController();
+                            const id = setTimeout(() => controller.abort(), 5000);
+                            const r = await fetch(`${apiBase.replace(/\/$/, '')}/health`, { signal: controller.signal });
+                            clearTimeout(id);
+                            if (r.ok) { online = true; lastErr = ''; }
+                            else { online = false; lastErr = `HTTP ${r.status}`; }
+                        } catch (e) {
+                            online = false; lastErr = e && e.message ? e.message : String(e);
+                        }
+                        updateNetStatus();
+                    }
+
+                    function updateNetStatus() {
+                        netStatusEl.textContent = online ? 'Status: online' : `Status: offline${lastErr ? ' - ' + lastErr : ''}`;
+                        netStatusEl.style.color = online ? 'lightgreen' : 'orange';
+                    }
+
+                    // 4. WebSocket with reconnect
+                    let ws;
+                    let wsBackoff = 1000;
+                    function setupWebSocket(force = false) {
+                        refreshEndpoints();
+                        if (ws && ws.readyState === WebSocket.OPEN && !force) return;
+                        try { if (ws) ws.close(); } catch(e) {}
+                        ws = new WebSocket(WS_URL);
+                        ws.onopen = () => { wsStatusEl.textContent = 'Connected'; wsStatusEl.style.color = 'lightgreen'; wsBackoff = 1000; };
+                        ws.onmessage = (event) => {
+                            try {
+                                const data = JSON.parse(event.data);
+                                wsMessagesEl.textContent += JSON.stringify(data, null, 2) + '\n\n';
+                                wsMessagesEl.scrollTop = wsMessagesEl.scrollHeight;
+                            } catch {}
+                        };
+                        ws.onerror = () => { wsStatusEl.textContent = 'Error'; wsStatusEl.style.color = 'red'; };
+                        ws.onclose = () => {
+                            wsStatusEl.textContent = 'Disconnected. Retrying...';
+                            wsStatusEl.style.color = 'orange';
+                            setTimeout(() => setupWebSocket(), Math.min(wsBackoff, 10000));
+                            wsBackoff *= 2;
+                        };
+                    }
+
+                    // Run
+                    async function main() {
+                        await setupCamera();
+                        await pingApi();
+                        setupWebSocket();
+                        setInterval(sendFrame, 1000);
+                    }
+                    main();
+                </script>
+            </body>
+            </html>

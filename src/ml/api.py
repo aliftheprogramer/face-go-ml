@@ -3,6 +3,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, Query
 from fastapi.responses import JSONResponse
 from fastapi.websockets import WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import cv2
 from .face_service import FaceService
@@ -16,6 +17,14 @@ except Exception:
     pass
 
 app = FastAPI(title="Face Attendance ML API")
+# Allow requests from file:// (Origin null) and other local origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # for local testing; tighten in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 svc = FaceService()
 dispatcher = EventDispatcher()
 ws_clients = set()
