@@ -2,6 +2,8 @@
 
 Proyek ini adalah layanan microservice berbasis FastAPI untuk mendaftarkan (enroll) embedding wajah dan mengenali (recognize) wajah dari gambar atau aliran kamera. Tujuan utama: mudah dijalankan di CPU, data lokal sederhana, dan integrasi gampang ke API utama via webhook + WebSocket.
 
+Catatan cepat: daftar lengkap endpoint tersedia di docs/ENDPOINTS.md.
+
 ## Fitur
 - Enroll gambar: simpan embedding 128-D per orang ke `data/embeddings/<id>.npy`
 - Recognize: prediksi label (ID) dan jarak (distance) per wajah pada gambar
@@ -165,6 +167,100 @@ Semua endpoint berjalan di host/port yang Anda jalankan (default `127.0.0.1:8000
 ### POST `/mock/webhook`
 - Untuk tes lokal: mengembalikan token dummy dan echo payload.
 
+## CRUD Siswa (Students)
+Layanan ini menyertakan CRUD sederhana untuk data siswa menggunakan SQLite (via SQLModel). Fokus utamanya adalah menambah siswa sekaligus menaruh foto ke `data/faces/<student_id>/` dan langsung di-enroll agar siap dikenali.
+
+Secara default, database disimpan di `data/students.db`. Lokasi dapat diubah dengan env `STUDENTS_DB_PATH`.
+
+### Model Siswa
+Field:
+- `id` (string, primary key) – dipakai sebagai label pengenalan wajah
+- `full_name` (string)
+- `birth_date` (string, opsional; format `YYYY-MM-DD`)
+- `class_name` (string, opsional)
+- `address` (string, opsional)
+- `created_at` (epoch seconds)
+- `last_photo_path` (string, opsional; path foto terakhir yang diunggah)
+
+### POST `/students`
+- Form-data:
+  - `student_id` (string, wajib)
+  - `full_name` (string, wajib)
+  - `birth_date` (string, opsional; contoh `2005-09-17`)
+  - `class_name` (string, opsional)
+  - `address` (string, opsional)
+  - `photo` (file gambar, opsional) – jika diberikan, akan disimpan ke `data/faces/<student_id>/<timestamp>.jpg`
+  - `enroll_after_upload` (bool, default `true`) – bila `true`, foto akan langsung dipakai untuk enroll embedding
+
+- Respons 200 (contoh, dengan foto disertakan dan sukses di-enroll):
+```json
+{
+  "ok": true,
+  "student": {
+    "id": "alip",
+    "full_name": "Alip Nugroho",
+    "birth_date": "2005-09-17",
+    "class_name": "12-IPA-1",
+    "address": "Jl. Melati No. 12, Bandung",
+    "last_photo_path": "data/faces/alip/1759146128060.jpg"
+  },
+  "enrolled": 1
+}
+```
+
+- Contoh curl:
+```bash
+curl -X POST "http://127.0.0.1:8000/students" \
+  -F student_id=alip \
+  -F full_name="Alip Nugroho" \
+  -F class_name="12-IPA-1" \
+  -F address="Jl. Melati No. 12, Bandung" \
+  -F enroll_after_upload=true \
+  -F photo=@known_faces/alip/IMG_20230927_203408.jpg
+```
+
+Catatan:
+- Jika `student_id` sudah ada, endpoint akan memperbarui nama/kelas/tanggal lahir (jika dikirim), menyimpan foto baru (jika dikirim), dan (opsional) melakukan enroll lagi agar embedding bertambah.
+- Enroll menyimpan embedding 128-D ke `data/embeddings/<student_id>.npy` dan segera memuat ulang ke memori.
+- Klien WS akan menerima event `{"type":"student.enrolled","student_id":"...","saved":N}` setelah enroll.
+
+### GET `/students`
+- Query:
+  - `q` (opsional; substring filter untuk `id` atau `full_name`)
+  - `limit` (default 50, maks 200)
+  - `offset` (default 0)
+
+- Respons 200 (contoh):
+```json
+{
+  "ok": true,
+  "items": [
+    {"id":"alip","full_name":"Alip Nugroho","birth_date":"2005-09-17","class_name":"12-IPA-1","address":"Jl. Melati No. 12, Bandung","last_photo_path":"data/faces/alip/1759....jpg"}
+  ]
+}
+```
+
+### GET `/students/{student_id}`
+- Respons 200 (contoh):
+```json
+{
+  "ok": true,
+  "student": {"id":"alip","full_name":"Alip Nugroho","birth_date":"2005-09-17","class_name":"12-IPA-1","last_photo_path":"data/faces/alip/1759....jpg"}
+  
+}
+```
+- Jika tidak ditemukan → 404.
+
+### Catatan Database: SQLite vs MongoDB Atlas
+- SQLite (default di repo ini):
+  - Kelebihan: tanpa setup server, cepat untuk lokal/dev, file tunggal.
+  - Kekurangan: tidak cocok untuk skala besar/konkurensi berat.
+- MongoDB Atlas:
+  - Kelebihan: managed cloud DB, dokument-store fleksibel, mudah di-scale & diakses dari mana saja.
+  - Kekurangan: perlu akun/kredensial & koneksi jaringan; kode perlu driver/ODM (contoh `motor`/`beanie`).
+
+Saran: mulai dengan SQLite untuk dev/prototipe. Jika butuh cloud DB atau skala lebih besar, kita bisa menambahkan backend MongoDB Atlas dan flag konfigurasi untuk switching.
+
 ## Realtime & Webhook (Integrasi dengan API Utama)
 Aktifkan dengan environment variable:
 ```bash
@@ -260,3 +356,6 @@ curl -X POST "http://127.0.0.1:8000/recognize/realtime?min_conf=0.45&send_unknow
 - Webhook mendukung Bearer token via `ATTENDANCE_API_KEY`.
 
 Selamat mencoba! Untuk kustomisasi pipeline (mis. ganti ke CNN atau menambah metadata), mulai dari `src/ml/face_service.py` dan endpoint di `src/ml/api.py`.
+
+
+http://127.0.0.1:8000/docs

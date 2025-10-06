@@ -11,9 +11,7 @@ build/
 # === Virtual environments & local tooling ===
 venv/
 .venv/
-.env
-.env.*
-*.env
+
 .python-version
 
 # === Jupyter ===
