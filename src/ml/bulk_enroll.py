@@ -1,3 +1,5 @@
+# src/ml/bulk_enroll.py
+
 import os
 from glob import glob
 from .face_service import FaceService

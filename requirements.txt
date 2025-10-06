@@ -1,6 +1,8 @@
+
 opencv-python
+face_recognition_models
 face_recognition
-numpy
+numpy==2.2.4
 fastapi
 uvicorn
 pydantic

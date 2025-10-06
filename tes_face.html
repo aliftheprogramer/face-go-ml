@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WebSocket Test</title>
+    <style>
+        body { font-family: sans-serif; background-color: #2d2d2d; color: #f1f1f1; }
+        #messages { background-color: #1e1e1e; border: 1px solid #444; padding: 10px; height: 400px; overflow-y: scroll; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+    <h1>WebSocket Realtime Recognition</h1>
+    <p>Status: <span id="status">Connecting...</span></p>
+    <h3>Received Messages:</h3>
+    <pre id="messages"></pre>
+
+    <script>
+        const ws = new WebSocket("ws://127.0.0.1:8000/ws/recognitions");
+        const statusEl = document.getElementById("status");
+        const messagesEl = document.getElementById("messages");
+
+        ws.onopen = (event) => {
+            statusEl.textContent = "Connected";
+            statusEl.style.color = "lightgreen";
+            console.log("WebSocket connection opened:", event);
+        };
+
+        ws.onmessage = (event) => {
+            console.log("Message from server:", event.data);
+            const data = JSON.parse(event.data);
+            messagesEl.textContent += JSON.stringify(data, null, 2) + "\n\n";
+            // Auto-scroll to bottom
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        };
+
+        ws.onerror = (error) => {
+            statusEl.textContent = "Error";
+            statusEl.style.color = "red";
+            console.error("WebSocket error:", error);
+        };
+
+        ws.onclose = (event) => {
+            statusEl.textContent = "Disconnected";
+            statusEl.style.color = "orange";
+            console.log("WebSocket connection closed:", event);
+        };
+    </script>
+</body>
+</html>

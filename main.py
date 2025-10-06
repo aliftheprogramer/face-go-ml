@@ -1,3 +1,5 @@
+# main.py
+
 from src.ml.api import app
 
 # Optional: allow `python main.py` to run the server directly

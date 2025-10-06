@@ -1,3 +1,5 @@
+#src/ml/api.py
+
 from fastapi import FastAPI, UploadFile, File, Form, Query
 from fastapi.responses import JSONResponse
 from fastapi.websockets import WebSocket, WebSocketDisconnect
@@ -19,11 +21,24 @@ dispatcher = EventDispatcher()
 ws_clients = set()
 
 
+def _imdecode_safe(content: bytes):
+    """Safely decode bytes -> BGR image or return None if invalid/empty."""
+    if not content:
+        return None
+    npimg = np.frombuffer(content, np.uint8)
+    if npimg.size == 0:
+        return None
+    try:
+        bgr = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+    return bgr
+
+
 @app.post("/enroll")
 async def enroll(student_id: str = Form(...), image: UploadFile = File(...)):
     content = await image.read()
-    npimg = np.frombuffer(content, np.uint8)
-    bgr = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+    bgr = _imdecode_safe(content)
     if bgr is None:
         return JSONResponse(status_code=400, content={"ok": False, "msg": "Gambar tidak valid"})
     n, msg = svc.enroll_from_image(student_id, bgr)
@@ -33,8 +48,7 @@ async def enroll(student_id: str = Form(...), image: UploadFile = File(...)):
 @app.post("/recognize")
 async def recognize(image: UploadFile = File(...)):
     content = await image.read()
-    npimg = np.frombuffer(content, np.uint8)
-    bgr = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+    bgr = _imdecode_safe(content)
     if bgr is None:
         return JSONResponse(status_code=400, content={"ok": False, "msg": "Gambar tidak valid"})
     results = svc.recognize(bgr)
@@ -53,8 +67,7 @@ async def recognize_realtime(
     Unknown faces are skipped by default (unless send_unknown=true). Cooldown is enforced per student.
     """
     content = await image.read()
-    npimg = np.frombuffer(content, np.uint8)
-    bgr = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+    bgr = _imdecode_safe(content)
     if bgr is None:
         return JSONResponse(status_code=400, content={"ok": False, "msg": "Gambar tidak valid"})
 

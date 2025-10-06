@@ -1,0 +1,889 @@
+#src/ml/api.py
+
+from fastapi import FastAPI, UploadFile, File, Form, Query
+from fastapi.responses import JSONResponse
+from fastapi.websockets import WebSocket, WebSocketDisconnect
+import numpy as np
+import cv2
+from .face_service import FaceService
+from .event_dispatcher import EventDispatcher
+import time
+import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+app = FastAPI(title="Face Attendance ML API")
+svc = FaceService()
+dispatcher = EventDispatcher()
+ws_clients = set()
+
+
+def _imdecode_safe(content: bytes):
+    """Safely decode bytes -> BGR image or return None if invalid/empty."""
+    if not content:
+        return None
+    npimg = np.frombuffer(content, np.uint8)
+    if npimg.size == 0:
+        return None
+    try:
+        bgr = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+    return bgr
+
+
+@app.post("/enroll")
+async def enroll(student_id: str = Form(...), image: UploadFile = File(...)):
+    content = await image.read()
+    bgr = _imdecode_safe(content)
+    if bgr is None:
+        return JSONResponse(status_code=400, content={"ok": False, "msg": "Gambar tidak valid"})
+    n, msg = svc.enroll_from_image(student_id, bgr)
+    return {"ok": n > 0, "saved": n, "msg": msg}
+
+
+@app.post("/recognize")
+async def recognize(image: UploadFile = File(...)):
+    content = await image.read()
+    bgr = _imdecode_safe(content)
+    if bgr is None:
+        return JSONResponse(status_code=400, content={"ok": False, "msg": "Gambar tidak valid"})
+    results = svc.recognize(bgr)
+    return {"ok": True, "results": results}
+
+
+@app.post("/recognize/realtime")
+async def recognize_realtime(
+    image: UploadFile = File(...),
+    min_conf: float = Query(0.0, description="Max allowed distance to consider recognized; <= tolerance used."),
+    send_unknown: bool = Query(False, description="If true, also send events for Unknown faces."),
+):
+    """
+    Recognize and immediately dispatch attendance event(s) to the main service, and broadcast via WebSocket.
+
+    Unknown faces are skipped by default (unless send_unknown=true). Cooldown is enforced per student.
+    """
+    content = await image.read()
+    bgr = _imdecode_safe(content)
+    if bgr is None:
+        return JSONResponse(status_code=400, content={"ok": False, "msg": "Gambar tidak valid"})
+
+    raw = svc.recognize(bgr)
+    # Normalize outputs from FaceService: it may return list[dict] or {"results": [...], "frame_info": {...}}
+    if isinstance(raw, dict):
+        results = raw.get("results", [])
+        frame_info = raw.get("frame_info", {})
+        w = int(frame_info.get("w", bgr.shape[1]))
+        h = int(frame_info.get("h", bgr.shape[0]))
+    else:
+        results = raw
+        h, w = bgr.shape[:2]
+
+    sent_reports = []
+    now = int(time.time())
+    tol = svc.tolerance
+    for r in results:
+        # Guard against malformed element
+        if not isinstance(r, dict):
+            continue
+        label = r.get("label", "Unknown")
+        dist = r.get("distance", None)
+        (top, right, bottom, left) = r.get("box", (0, 0, 0, 0))
+        is_known = label != "Unknown" and dist is not None and dist <= max(0.0, min_conf or tol)
+        if is_known or (send_unknown and label == "Unknown"):
+            payload = {
+                "event": "attendance.recognized",
+                "student_id": label,
+                "distance": dist,
+                "ts": now,
+                "frame_info": {"w": w, "h": h},
+                "box": {"top": top, "right": right, "bottom": bottom, "left": left},
+            }
+            report = dispatcher.maybe_send(label, payload)
+            sent_reports.append({"label": label, "report": report})
+            # Broadcast to WS subscribers
+            _broadcast_ws({
+                "type": "recognized",
+                "student_id": label,
+                "distance": dist,
+                "ts": now,
+                "dispatch": report
+            })
+    return {"ok": True, "results": results, "dispatch": sent_reports, "webhook_enabled": dispatcher.enabled()}
+
+
+@app.get("/health")
+async def health():
+    return {"ok": True, "encodings": len(svc.known_encodings), "labels": len(set(svc.known_labels))}
+
+
+@app.get("/config")
+async def config():
+    return {
+        "tolerance": svc.tolerance,
+        "webhook_enabled": dispatcher.enabled(),
+        "cooldown_seconds": int(os.getenv("EVENT_COOLDOWN_SECONDS", "60")),
+    }
+
+
+# --- WebSocket: push recognition updates to subscribers ---
+@app.websocket("/ws/recognitions")
+async def ws_recognitions(ws: WebSocket):
+    await ws.accept()
+    ws_clients.add(ws)
+    try:
+        while True:
+            # Keep connection alive; client may send pings
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        ws_clients.discard(ws)
+
+
+def _broadcast_ws(message: dict):
+    import json
+    data = json.dumps(message)
+    dead = []
+    for ws in list(ws_clients):
+        try:
+            # send in background best-effort (FastAPI doesn't provide built-in task here)
+            import anyio
+            anyio.from_thread.run(ws.send_text, data)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        ws_clients.discard(ws)
+
+
+# (deduplicated above)
+
+
+# --- Mock webhook for testing tokens locally (optional) ---
+@app.post("/mock/webhook")
+async def mock_webhook(payload: dict):
+    # pretend we issue a token for attendance; echo back
+    token = f"ATT-{int(time.time())}-{payload.get('student_id','UNKNOWN')}"
+    return {"ok": True, "token": token, "received": payload}
+
+
+# src/ml/bulk_enroll.py
+
+import os
+from glob import glob
+from .face_service import FaceService
+
+KNOWN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'known_faces')
+
+def main():
+    svc = FaceService()
+    if not os.path.isdir(KNOWN_DIR):
+        print(f"Folder tidak ditemukan: {KNOWN_DIR}")
+        return
+
+    labels = [d for d in os.listdir(KNOWN_DIR) if os.path.isdir(os.path.join(KNOWN_DIR, d))]
+    if not labels:
+        print("Tidak ada subfolder di known_faces/. Buat known_faces/<student_id> dan taruh gambar di dalamnya.")
+        return
+
+    total = 0
+    for label in labels:
+        img_paths = []
+        for ext in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
+            img_paths.extend(glob(os.path.join(KNOWN_DIR, label, ext)))
+        if not img_paths:
+            print(f"- {label}: tidak ada gambar, lewati.")
+            continue
+        saved = 0
+        for p in img_paths:
+            r = svc.enroll_from_path(label, p)
+            saved += r.get("saved", 0)
+        total += saved
+        print(f"- {label}: {saved} embedding ditambahkan.")
+    print(f"Selesai. Total embedding tersimpan: {total}")
+
+if __name__ == '__main__':
+    main()
+
+
+# src/ml/cam_demo.py
+
+import cv2
+import time
+from .face_service import FaceService
+
+
+def run():
+    svc = FaceService()
+    cam = cv2.VideoCapture(0)
+    cam.set(3, 640)
+    cam.set(4, 480)
+    if not cam.isOpened():
+        print("Error: Tidak dapat membuka kamera.")
+        return
+    print("Kamera aktif. Tekan 'q' untuk keluar.")
+    last = 0
+    while True:
+        ok, frame = cam.read()
+        if not ok:
+            print("Gagal mengambil frame")
+            break
+        # limit inference fps ~10
+        now = time.time()
+        if now - last > 0.08:
+            out = svc.recognize(frame)
+            last = now
+        else:
+            out = getattr(run, "_last_out", {"results": []})
+        results = out["results"]
+        for r in results:
+            t, rgt, b, lft = r["box"]
+            cv2.rectangle(frame, (lft, t), (rgt, b), (0, 255, 0), 2)
+            txt = f'{r["label"]} {r["distance"]:.2f}'
+            cv2.putText(frame, txt, (lft, max(20, t - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        run._last_out = out
+        cv2.imshow("Face Recognition (local)", frame)
+        k = cv2.waitKey(1) & 0xFF
+        if k == ord('q') or k == 27:
+            break
+    cam.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    run()
+
+
+
+# src/ml/event_dispatcher.py
+
+import os
+import time
+import threading
+import requests
+from typing import Dict, Any, Optional, Tuple, List
+
+
+class EventDispatcher:
+    """
+    Dispatch recognition events to the main Attendance API via a webhook.
+
+        Config via env:
+      - ATTENDANCE_WEBHOOK_URL: str (required to enable dispatch)
+      - ATTENDANCE_API_KEY: str (optional; sent as header Authorization: Bearer <key>)
+            - EVENT_COOLDOWN_SECONDS: int (default 5) minimal interval per student_id
+    """
+
+    def __init__(self) -> None:
+        self.webhook_url: Optional[str] = os.getenv("ATTENDANCE_WEBHOOK_URL")
+        self.api_key: Optional[str] = os.getenv("ATTENDANCE_API_KEY")
+        try:
+            self.cooldown: int = int(os.getenv("EVENT_COOLDOWN_SECONDS", "5"))
+        except ValueError:
+            self.cooldown = 5
+        self._last_sent: Dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def enabled(self) -> bool:
+        return bool(self.webhook_url)
+
+    def _should_send(self, student_id: str) -> Tuple[bool, str]:
+        now = time.time()
+        with self._lock:
+            last = self._last_sent.get(student_id, 0)
+            if now - last < self.cooldown:
+                return False, f"cooldown_active ({int(self.cooldown - (now - last))}s left)"
+            self._last_sent[student_id] = now
+        return True, "ok"
+
+    def _headers(self) -> Dict[str, str]:
+        h = {"Content-Type": "application/json"}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    def send(self, payload: Dict[str, Any]) -> Tuple[bool, str, Optional[int]]:
+        if not self.enabled():
+            return False, "webhook_disabled", None
+        try:
+            r = requests.post(self.webhook_url, json=payload, headers=self._headers(), timeout=10)
+            # Return response body so caller can see tokens/messages from main API
+            return r.ok, r.text, r.status_code
+        except Exception as e:
+            return False, str(e), None
+
+    def maybe_send(self, student_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Conditionally send with cooldown. Returns a report dict.
+        """
+        allowed, reason = self._should_send(student_id)
+        if not allowed:
+            return {"status": "skipped", "reason": reason}
+        ok, msg, code = self.send(payload)
+        return {"status": "sent" if ok else "failed", "http_status": code, "message": msg}
+# src/ml/face_service.py
+
+import os
+import time
+from typing import List, Tuple, Optional, Dict
+
+import cv2
+import numpy as np
+import face_recognition as fr
+
+EMB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data', 'embeddings')
+FACES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data', 'faces')
+os.makedirs(EMB_DIR, exist_ok=True)
+os.makedirs(FACES_DIR, exist_ok=True)
+
+
+class FaceService:
+    """
+    Core face embedding service using face_recognition.
+    - Enroll: save npy embeddings per student_id at data/embeddings/<id>.npy
+    - Recognize: return best match with distance for each face in frame
+    """
+    def __init__(self, tolerance: Optional[float] = None) -> None:
+        if tolerance is None:
+            try:
+                tolerance = float(os.getenv("FACE_TOLERANCE", "0.45"))
+            except ValueError:
+                tolerance = 0.45
+        self.tolerance: float = tolerance
+        self._known: Dict[str, np.ndarray] = {}
+        self._known_encs: List[np.ndarray] = []
+        self._known_labels: List[str] = []
+        self._reload_known()
+
+    def _reload_known(self) -> None:
+        self._known.clear()
+        self._known_encs.clear()
+        self._known_labels.clear()
+        for f in os.listdir(EMB_DIR):
+            if not f.endswith(".npy"):
+                continue
+            label = os.path.splitext(f)[0]
+            arr = np.load(os.path.join(EMB_DIR, f))
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            if arr.size == 0:
+                continue
+            self._known[label] = arr
+            for enc in arr:
+                self._known_encs.append(enc)
+                self._known_labels.append(label)
+
+    @staticmethod
+    def _bgr_to_rgb(img: np.ndarray) -> np.ndarray:
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    @staticmethod
+    def _crop(img: np.ndarray, box: Tuple[int, int, int, int]) -> np.ndarray:
+        top, right, bottom, left = box
+        h, w = img.shape[:2]
+        top = max(0, top); left = max(0, left)
+        bottom = min(h, bottom); right = min(w, right)
+        return img[top:bottom, left:right].copy()
+
+    def enroll_from_image(self, label: str, image_bgr: np.ndarray) -> Dict[str, int]:
+        rgb = self._bgr_to_rgb(image_bgr)
+        boxes = fr.face_locations(rgb, model="hog")
+        if not boxes:
+            return {"faces_found": 0, "saved": 0}
+        encs = fr.face_encodings(rgb, boxes)
+        saved = 0
+        save_path = os.path.join(EMB_DIR, f"{label}.npy")
+        prev = np.load(save_path) if os.path.exists(save_path) else np.empty((0, 128))
+        if prev.ndim == 1 and prev.size == 128:
+            prev = prev.reshape(1, -1)
+        for box, enc in zip(boxes, encs):
+            prev = np.vstack([prev, enc])
+            # save cropped face for reference
+            crop = self._crop(image_bgr, box)
+            dest_dir = os.path.join(FACES_DIR, label)
+            os.makedirs(dest_dir, exist_ok=True)
+            cv2.imwrite(os.path.join(dest_dir, f"{int(time.time()*1000)}.jpg"), crop)
+            saved += 1
+        np.save(save_path, prev)
+        self._reload_known()
+        return {"faces_found": len(boxes), "saved": saved}
+
+    def enroll_from_path(self, label: str, image_path: str) -> Dict[str, int]:
+        img = cv2.imread(image_path)
+        if img is None:
+            return {"faces_found": 0, "saved": 0}
+        return self.enroll_from_image(label, img)
+
+    def recognize(self, image_bgr: np.ndarray) -> Dict[str, any]:
+        rgb = self._bgr_to_rgb(image_bgr)
+        boxes = fr.face_locations(rgb, model="hog")  # returns (top, right, bottom, left)
+        encs = fr.face_encodings(rgb, boxes)
+        results = []
+        for box, enc in zip(boxes, encs):
+            label = "Unknown"
+            best_dist = 1.0
+            if self._known_encs:
+                dists = fr.face_distance(self._known_encs, enc)
+                idx = int(np.argmin(dists))
+                best_dist = float(dists[idx])
+                if best_dist <= self.tolerance:
+                    label = self._known_labels[idx]
+            top, right, bottom, left = map(int, box)
+            results.append({
+                "box": [top, right, bottom, left],
+                "label": label,
+                "distance": round(best_dist, 4)
+            })
+        h, w = image_bgr.shape[:2]
+        return {"results": results, "frame_info": {"w": int(w), "h": int(h)}}
+
+
+if __name__ == "__main__":
+    svc = FaceService()
+    print(f"Loaded {len(svc.known_encodings)} encodings for {len(set(svc.known_labels))} labels")
+
+
+# src/ml/rt_client.py
+
+import os
+import cv2
+import time
+import json
+import threading
+import asyncio
+import requests
+import numpy as np
+import websockets
+
+API_URL = 'http://127.0.0.1:8000/recognize/realtime?min_conf=0.45'
+WS_URL = 'ws://127.0.0.1:8000/ws/recognitions'
+
+
+def main():
+    print("Mengirim frame ke API setiap ~0.5-1.0 detik. Tekan 'q' untuk keluar.")
+
+    # Start WebSocket listener thread
+    def ws_thread():
+        async def listen():
+            try:
+                async with websockets.connect(WS_URL) as ws:
+                    # Send a dummy ping periodically to keep connection
+                    async def pinger():
+                        while True:
+                            try:
+                                await ws.send("ping")
+                            except Exception:
+                                break
+                            await asyncio.sleep(15)
+                    asyncio.create_task(pinger())
+                    while True:
+                        msg = await ws.recv()
+                        print("WS:", msg)
+            except Exception as e:
+                print("WS error:", e)
+        asyncio.run(listen())
+
+    t = threading.Thread(target=ws_thread, daemon=True)
+    t.start()
+
+    cam = cv2.VideoCapture(0)
+    cam.set(3, 640)
+    cam.set(4, 480)
+    if not cam.isOpened():
+        print("Error: Tidak dapat membuka kamera.")
+        return
+
+    last_send = 0
+    while True:
+        ok, frame = cam.read()
+        if not ok:
+            print("Gagal mengambil frame")
+            break
+
+        # draw last results if any
+        if hasattr(main, "_last_results"):
+            for r in main._last_results:
+                t_, rgt, btm, lft = r["box"]
+                cv2.rectangle(frame, (lft, t_), (rgt, btm), (0, 255, 255), 2)
+                txt = f'{r["label"]} {r["distance"]:.2f}'
+                cv2.putText(frame, txt, (lft, max(20, t_-10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
+
+        now = time.time()
+        if now - last_send > 0.7:
+            last_send = now
+            ok2, buf = cv2.imencode(".jpg", frame)
+            if ok2:
+                files = {"image": ("frame.jpg", buf.tobytes(), "image/jpeg")}
+                try:
+                    r = requests.post(API_URL, files=files, timeout=15)
+                    if r.ok:
+                        data = r.json()
+                        results = data.get("results", [])
+                        main._last_results = results
+                        # Print dispatch summaries
+                        for d in data.get("dispatch", []):
+                            label = d.get("label")
+                            rep = d.get("report", {})
+                            status = rep.get("status")
+                            http_status = rep.get("http_status")
+                            # When status is "skipped", server returns a "reason" instead of "message"
+                            msg = rep.get("message") or rep.get("reason")
+                            print(f'dispatch[{label}] -> {status} ({http_status}) {msg}')
+                    else:
+                        print("HTTP error:", r.status_code, r.text[:200])
+                except Exception as e:
+                    print("POST error:", e)
+
+        cv2.imshow("Realtime Client (API)", frame)
+        k = cv2.waitKey(1) & 0xFF
+        if k == ord('q') or k == 27:
+            break
+
+    cam.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == '__main__':
+    main()
+
+
+# Face Attendance ML (Layanan ML untuk Absensi Wajah)
+
+Proyek ini adalah layanan microservice berbasis FastAPI untuk mendaftarkan (enroll) embedding wajah dan mengenali (recognize) wajah dari gambar atau aliran kamera. Tujuan utama: mudah dijalankan di CPU, data lokal sederhana, dan integrasi gampang ke API utama via webhook + WebSocket.
+
+## Fitur
+- Enroll gambar: simpan embedding 128-D per orang ke `data/embeddings/<id>.npy`
+- Recognize: prediksi label (ID) dan jarak (distance) per wajah pada gambar
+- Mode realtime:
+  - Dispatch event ke API utama melalui webhook (opsional)
+  - Broadcast notifikasi ke klien via WebSocket
+- Demo lokal: webcam (`src/ml/cam_demo.py`) dan klien realtime (`src/ml/rt_client.py`)
+
+## Persyaratan Sistem (Linux)
+- Python 3.10+ (contoh berjalan di 3.12)
+- Kamera (opsional) untuk demo webcam
+- Paket sistem umum untuk OpenCV/dlib:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake libgl1 libglib2.0-0
+```
+
+Catatan: `face_recognition` memakai dlib; wheel pra-bangun biasanya tersedia. Jika butuh kompilasi dari sumber, pastikan toolchain di atas siap.
+
+## Instalasi
+Jalankan di folder project.
+
+```bash
+# 1) Buat dan aktifkan virtualenv
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip
+
+# 2) Pasang dependensi Python
+pip install -r requirements.txt
+```
+
+Jika pemasangan `face_recognition`/OpenCV gagal, pastikan paket sistem pada bagian Persyaratan sudah terpasang, lalu ulangi `pip install -r requirements.txt`.
+
+## Menjalankan Server API
+Pilih salah satu:
+
+```bash
+# Opsi A: jalankan dari modul
+uvicorn src.ml.api:app --reload
+
+# Opsi B: jalankan via file main.py
+uvicorn main:app --reload
+```
+
+Cek cepat:
+- Swagger Docs: http://127.0.0.1:8000/docs
+- Health: http://127.0.0.1:8000/health
+
+Jika muncul `ModuleNotFoundError: fastapi`, pastikan venv aktif dan `pip install -r requirements.txt` sudah dilakukan.
+
+## Cara Training / Enroll Model
+“Training” = mengumpulkan embedding 128-D untuk tiap orang yang akan dikenali. Embedding disimpan per ID ke file `.npy`.
+
+Ada 2 cara:
+
+1) Enroll satu gambar via REST API
+```bash
+curl -X POST "http://127.0.0.1:8000/enroll" \
+  -F student_id=alip \
+  -F image=@known_faces/alip/IMG_20230927_203408.jpg
+```
+Respon contoh:
+```json
+{ "ok": true, "saved": 1, "msg": {"faces_found": 1, "saved": 1} }
+```
+
+2) Enroll massal (bulk) dari folder `known_faces/`
+Struktur contoh:
+```
+known_faces/
+  alip/
+    foto1.jpg
+    foto2.jpg
+  yoga/
+    a.jpg
+    b.jpg
+```
+Jalankan:
+```bash
+python -m src.ml.bulk_enroll
+```
+Hasil embedding disimpan di `data/embeddings/<label>.npy`. Cropped face juga disimpan di `data/faces/<label>/*.jpg` sebagai referensi.
+
+Tips data:
+- Sertakan beberapa foto dengan variasi pose/pencahayaan untuk tiap orang
+- Pastikan wajah jelas (frontal/near-frontal) dan resolusi memadai
+
+## Cara Kerja Face Recognition (Ringkas)
+1) Konversi BGR (OpenCV) → RGB
+2) Deteksi wajah dengan HOG (`face_recognition.face_locations(..., model="hog")`)
+3) Ekstraksi embedding 128-D (`face_recognition.face_encodings`)
+4) Bandingkan embedding baru ke semua embedding dikenal (Euclidean distance)
+5) Ambil jarak minimum. Jika `distance <= tolerance` → cocok; jika tidak → "Unknown"
+
+Parameter penting:
+- `tolerance` default 0.45 (lebih kecil = lebih ketat)
+  - Dapat diatur via env `FACE_TOLERANCE` atau parameter `min_conf` pada endpoint realtime
+
+Output per wajah:
+- `box`: [top, right, bottom, left]
+- `label`: ID yang dikenali atau `Unknown`
+- `distance`: jarak terbaik (semakin kecil → semakin mirip)
+
+## Referensi Endpoint
+Semua endpoint berjalan di host/port yang Anda jalankan (default `127.0.0.1:8000`).
+
+### POST `/enroll`
+- Form-data:
+  - `student_id`: string (wajib)
+  - `image`: file (wajib)
+- Respon 200:
+```json
+{ "ok": true, "saved": 1, "msg": {"faces_found": 1, "saved": 1} }
+```
+
+### POST `/recognize`
+- Form-data: `image` (wajib)
+- Respon 200:
+```json
+{ "ok": true, "results": [ {"box":[120,260,220,160], "label":"alip", "distance":0.38} ] }
+```
+
+### POST `/recognize/realtime`
+- Query opsional:
+  - `min_conf`: float (default 0.0). Jika 0 → gunakan `tolerance` server.
+  - `send_unknown`: bool (default false). Jika true → Unknown juga diproses/dikirim event.
+- Form-data: `image` (wajib)
+- Perilaku:
+  - Mengembalikan hasil seperti `/recognize`
+  - Jika cocok atau `send_unknown=true`, server:
+    - Mengirim event ke webhook (jika diaktifkan via env)
+    - Broadcast WS ke `/ws/recognitions`
+- Respon 200 (contoh):
+```json
+{
+  "ok": true,
+  "results": [ {"box":[120,260,220,160], "label":"alip", "distance":0.38} ],
+  "dispatch": [ { "label": "alip", "report": {"status":"sent","http_status":200,"message":"..."} } ],
+  "webhook_enabled": true
+}
+```
+
+### GET `/health`
+```json
+{ "ok": true, "encodings": 25, "labels": 2 }
+```
+
+### GET `/config`
+```json
+{ "tolerance": 0.45, "webhook_enabled": true, "cooldown_seconds": 60 }
+```
+
+### WebSocket `/ws/recognitions`
+- Contoh pesan dari server:
+```json
+{ "type":"recognized", "student_id":"alip", "distance":0.38, "ts":1727580000, "dispatch": {"status":"sent"} }
+```
+
+### POST `/mock/webhook`
+- Untuk tes lokal: mengembalikan token dummy dan echo payload.
+
+## Realtime & Webhook (Integrasi dengan API Utama)
+Aktifkan dengan environment variable:
+```bash
+export ATTENDANCE_WEBHOOK_URL="https://api-utama.example.com/attendance/events"
+export ATTENDANCE_API_KEY="<opsional-token>"
+export EVENT_COOLDOWN_SECONDS=5   # jeda minimal per orang (default 5)
+```
+Jika `ATTENDANCE_WEBHOOK_URL` kosong → webhook nonaktif (tetap ada WS broadcast dan respon lokal).
+
+Ringkas alur integrasi:
+- ML memanggil webhook API utama dengan payload:
+```json
+{
+  "event": "attendance.recognized",
+  "student_id": "alip",
+  "distance": 0.38,
+  "ts": 1727580000,
+  "frame_info": {"w": 640, "h": 480},
+  "box": {"top":120,"right":260,"bottom":220,"left":160}
+}
+```
+- API utama memvalidasi, deduplikasi, dan menyimpan absensi, lalu merespons 2xx.
+- Respons API utama akan diteruskan kembali sebagai `dispatch[].report.message` di respon endpoint realtime dan dikirim ke WS.
+
+## Struktur Folder
+```
+project/
+  data/
+    embeddings/            # .npy per student_id (embedding 128-D)
+    faces/
+      <student_id>/        # crop wajah yang disimpan saat enroll
+  known_faces/             # sumber gambar untuk bulk_enroll (input)
+  src/ml/
+    api.py                 # FastAPI endpoints
+    face_service.py        # logika core: enroll & recognize
+    event_dispatcher.py    # kirim event ke API utama via webhook
+    cam_demo.py            # demo webcam lokal
+    rt_client.py           # klien realtime (HTTP + WS)
+  main.py                  # entry opsional untuk uvicorn main:app
+```
+
+## Demo & Contoh Pakai
+- Demo Webcam (lokal):
+```bash
+python -m src.ml.cam_demo
+```
+- Klien Realtime (HTTP + WS):
+```bash
+python -m src.ml.rt_client
+```
+- Contoh cepat (copy-paste):
+```bash
+# Jalankan server
+source venv/bin/activate
+uvicorn src.ml.api:app --reload
+
+# Enroll satu foto
+curl -X POST "http://127.0.0.1:8000/enroll" \
+  -F student_id=alip \
+  -F image=@known_faces/alip/IMG_20230927_203408.jpg
+
+# Recognize sekali
+curl -X POST "http://127.0.0.1:8000/recognize" \
+  -F image=@known_faces/alip/IMG_20230927_203408.jpg
+
+# Recognize realtime + kirim event (opsional) + WS broadcast
+export ATTENDANCE_WEBHOOK_URL="http://127.0.0.1:8000/mock/webhook"
+curl -X POST "http://127.0.0.1:8000/recognize/realtime?min_conf=0.45&send_unknown=false" \
+  -F image=@known_faces/alip/IMG_20230927_203408.jpg
+```
+
+## Troubleshooting (Masalah Umum)
+- `ModuleNotFoundError: fastapi` atau paket lain
+  - Aktifkan venv: `source venv/bin/activate`
+  - Pasang deps: `pip install -r requirements.txt`
+  - Jalankan uvicorn dengan Python venv: `python -m uvicorn src.ml.api:app --reload`
+- Gagal pasang `dlib`/`face_recognition`
+  - Pastikan paket sistem: `build-essential cmake libgl1 libglib2.0-0`
+  - Upgrade alat: `pip install -U pip setuptools wheel`
+- Kamera tidak terbuka (demo webcam)
+  - Coba index kamera lain: `cv2.VideoCapture(1)` atau `2`
+  - Pastikan tidak sedang dipakai aplikasi lain
+- Tidak ada wajah terdeteksi saat enroll/recognize
+  - Coba gambar lain yang lebih jelas; posisi frontal/near-frontal
+- WebSocket tidak menerima pesan
+  - Pastikan endpoint `/recognize/realtime` dipanggil dan server aktif
+  - Periksa firewall/port jika akses dari perangkat lain
+- Event webhook selalu `skipped`
+  - Mekanisme cooldown aktif. Atur `EVENT_COOLDOWN_SECONDS` atau tunggu jeda.
+
+## Catatan Keamanan
+- Endpoint publik tidak memiliki autentikasi bawaan. Jika dipublikasikan, gunakan API Gateway/Reverse Proxy dengan autentikasi & rate-limit.
+- Webhook mendukung Bearer token via `ATTENDANCE_API_KEY`.
+
+Selamat mencoba! Untuk kustomisasi pipeline (mis. ganti ke CNN atau menambah metadata), mulai dari `src/ml/face_service.py` dan endpoint di `src/ml/api.py`.
+
+
+# main.py
+
+from src.ml.api import app
+
+# Optional: allow `python main.py` to run the server directly
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WebSocket Test</title>
+    <style>
+        body { font-family: sans-serif; background-color: #2d2d2d; color: #f1f1f1; }
+        #messages { background-color: #1e1e1e; border: 1px solid #444; padding: 10px; height: 400px; overflow-y: scroll; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+    <h1>WebSocket Realtime Recognition</h1>
+    <p>Status: <span id="status">Connecting...</span></p>
+    <h3>Received Messages:</h3>
+    <pre id="messages"></pre>
+
+    <script>
+        const ws = new WebSocket("ws://127.0.0.1:8000/ws/recognitions");
+        const statusEl = document.getElementById("status");
+        const messagesEl = document.getElementById("messages");
+
+        ws.onopen = (event) => {
+            statusEl.textContent = "Connected";
+            statusEl.style.color = "lightgreen";
+            console.log("WebSocket connection opened:", event);
+        };
+
+        ws.onmessage = (event) => {
+            console.log("Message from server:", event.data);
+            const data = JSON.parse(event.data);
+            messagesEl.textContent += JSON.stringify(data, null, 2) + "\n\n";
+            // Auto-scroll to bottom
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        };
+
+        ws.onerror = (error) => {
+            statusEl.textContent = "Error";
+            statusEl.style.color = "red";
+            console.error("WebSocket error:", error);
+        };
+
+        ws.onclose = (event) => {
+            statusEl.textContent = "Disconnected";
+            statusEl.style.color = "orange";
+            console.log("WebSocket connection closed:", event);
+        };
+    </script>
+</body>
+</html> 
+
+
+//requirements.txt
+
+opencv-python
+face_recognition
+numpy
+fastapi
+uvicorn
+pydantic
+python-multipart
+requests
+python-dotenv
+websockets
