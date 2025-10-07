@@ -1,6 +1,7 @@
 #src/ml/api.py
 
 from fastapi import FastAPI, UploadFile, File, Form, Query
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.websockets import WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -444,7 +445,8 @@ async def recognize_realtime(
                 "frame_info": {"w": w, "h": h},
                 "box": {"top": top, "right": right, "bottom": bottom, "left": left},
             }
-            report = dispatcher.maybe_send(label, payload)
+            # Send webhook without blocking the event loop (prevents deadlock when calling same server)
+            report = await run_in_threadpool(dispatcher.maybe_send, label, payload)
             sent_reports.append({"label": label, "report": report})
             # Broadcast to WS subscribers
             _broadcast_ws({
