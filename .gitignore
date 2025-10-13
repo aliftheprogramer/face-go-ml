@@ -31,16 +31,6 @@ logs/
 
 # === Project data (generated artifacts) ===
 # Face embeddings (generated)
-data/embeddings/**
-!data/embeddings/.gitkeep
-
-# Cropped face images (generated)
-data/faces/**
-!data/faces/.gitkeep
-
-# Raw/personal training images – keep folder only (privacy)
-known_faces/**
-!known_faces/.gitkeep
 
 # Optionally ignore local cascade file if you drop one here
 haarcascade_frontalface_default.xml
